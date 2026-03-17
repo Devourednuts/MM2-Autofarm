@@ -1,95 +1,137 @@
 --!strict
-local Players = game:GetService("Players")
+--!optimize 2
+--!native
 
+local Players = game:GetService("Players")
 local localPlayer = Players.LocalPlayer
 if not localPlayer then return end
-
 local character = localPlayer.Character
 if not character then return end
-
 local rootPart = character.PrimaryPart
 if not rootPart then return end
 
-local DESTINATION_X = 318.796387
-local DESTINATION_Y = 536.528137
-local DESTINATION_Z = 88.513458
-local TELEPORT_STEPS = 4
-local TELEPORT_STEP_WAIT = 0.25
-local SCAN_INTERVAL = 1
+local DESTINATION_X: number = 318.796387
+local DESTINATION_Y: number = 536.528137
+local DESTINATION_Z: number = 88.513458
+local SCAN_INTERVAL: number = 1
+local ARRIVAL_THRESHOLD_SQUARED: number = 4
+local Y_OFFSET: number = -1.5
+local PING_STEP_DIVISOR: number = 5
+local MAP_START_DELAY: number = 5
 
-local function interpolateTo(tx: number, ty: number, tz: number): ()
+local BASEPART_CLASSNAMES: { [string]: boolean } = {
+	Part = true,
+	MeshPart = true,
+	UnionOperation = true,
+	SpawnLocation = true,
+	CornerWedgePart = true,
+	TrussPart = true,
+	WedgePart = true,
+}
+
+local function isAlive(): boolean
+	return localPlayer:GetAttribute("Alive") == "true"
+end
+
+local function interpolateTo(targetX: number, targetY: number, targetZ: number): ()
 	local origin = rootPart.CFrame.Position
-	local ox = origin.X
-	local oy = origin.Y
-	local oz = origin.Z
-	for i = 1, TELEPORT_STEPS do
-		local alpha = i / TELEPORT_STEPS
+	local originX = origin.X
+	local originY = origin.Y
+	local originZ = origin.Z
+	local deltaX = targetX - originX
+	local deltaY = (targetY + Y_OFFSET) - originY
+	local deltaZ = targetZ - originZ
+	local overlayFramesPerSecond = get_overlay_fps()
+	local stepWait: number = if overlayFramesPerSecond > 0 then 1 / overlayFramesPerSecond else 0.016
+	local stepCount = math.max(1, math.round(game:GetPing() / PING_STEP_DIVISOR))
+	for i = 1, stepCount do
+		local alpha = i / stepCount
 		rootPart.CFrame = CFrame.new(
-			ox + (tx - ox) * alpha,
-			oy + (ty - oy) * alpha,
-			oz + (tz - oz) * alpha
+			originX + deltaX * alpha,
+			originY + deltaY * alpha,
+			originZ + deltaZ * alpha
 		)
-		task.wait(TELEPORT_STEP_WAIT)
+		task.wait(stepWait)
 	end
 end
 
 local function runLobby(): ()
-	while localPlayer:GetAttribute("Alive") ~= "true" do
-		interpolateTo(DESTINATION_X, DESTINATION_Y, DESTINATION_Z)
+	while not isAlive() do
+		local origin = rootPart.CFrame.Position
+		local deltaX = DESTINATION_X - origin.X
+		local deltaY = DESTINATION_Y - origin.Y
+		local deltaZ = DESTINATION_Z - origin.Z
+		if deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ > ARRIVAL_THRESHOLD_SQUARED then
+			interpolateTo(DESTINATION_X, DESTINATION_Y, DESTINATION_Z)
+		else
+			task.wait(SCAN_INTERVAL)
+		end
 	end
 end
 
-local function runMap(): ()
-	while localPlayer:GetAttribute("Alive") == "true" do
-		local coins: { BasePart } = {}
-		for _, descendant in workspace:GetDescendants() do
-			if descendant.Name == "Coin_Server" then
-				table.insert(coins, descendant :: BasePart)
+local function scanCoins(coins: { BasePart }): number
+	table.clear(coins)
+	for _, descendant in workspace:GetDescendants() do
+		if descendant.Name == "Coin_Server" and BASEPART_CLASSNAMES[descendant.ClassName] then
+			local success, _ = pcall(function()
+				local _ = (descendant :: BasePart).Position
+			end)
+			if success then
+				coins[#coins + 1] = descendant :: BasePart
 			end
 		end
+	end
+	return #coins
+end
 
-		if #coins == 0 then
+local function runMap(): ()
+	local coins: { BasePart } = {}
+	local hasWaited = false
+	while isAlive() do
+		local coinCount = scanCoins(coins)
+		if coinCount == 0 then
+			hasWaited = false
 			task.wait(SCAN_INTERVAL)
 			continue
 		end
-
-		while #coins > 0 and localPlayer:GetAttribute("Alive") == "true" do
-			local rp = rootPart.Position
-			local rx = rp.X
-			local ry = rp.Y
-			local rz = rp.Z
-
-			local nearestIndex = 1
-			local nearestDistSq = math.huge
-
-			for i = 1, #coins do
-				local cp = coins[i].Position
-				local dx = cp.X - rx
-				local dy = cp.Y - ry
-				local dz = cp.Z - rz
-				local dSq = dx * dx + dy * dy + dz * dz
-				if dSq < nearestDistSq then
-					nearestDistSq = dSq
-					nearestIndex = i
+		if not hasWaited then
+			task.wait(MAP_START_DELAY)
+			hasWaited = true
+			continue
+		end
+		while coinCount > 0 and isAlive() do
+			local rootPosition = rootPart.Position
+			local rootX = rootPosition.X
+			local rootY = rootPosition.Y
+			local rootZ = rootPosition.Z
+			local nearestCoinIndex = 1
+			local nearestDistanceSquared = math.huge
+			for i = 1, coinCount do
+				local coinPosition = coins[i].Position
+				local deltaX = coinPosition.X - rootX
+				local deltaY = coinPosition.Y - rootY
+				local deltaZ = coinPosition.Z - rootZ
+				local distanceSquared = deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ
+				if distanceSquared < nearestDistanceSquared then
+					nearestDistanceSquared = distanceSquared
+					nearestCoinIndex = i
 				end
 			end
-
-			local pos = coins[nearestIndex].Position
-			local last = #coins
-			coins[nearestIndex] = coins[last]
-			coins[last] = nil :: any
-
-			interpolateTo(pos.X, pos.Y, pos.Z)
+			local targetPosition = coins[nearestCoinIndex].Position
+			coins[nearestCoinIndex] = coins[coinCount]
+			coins[coinCount] = nil :: any
+			coinCount -= 1
+			interpolateTo(targetPosition.X, targetPosition.Y, targetPosition.Z)
 		end
 	end
 end
 
 local lastAlive: boolean? = nil
-
-print("Autofarm Initilised")
-
 while true do
-	local alive = localPlayer:GetAttribute("Alive") == "true"
+	local alive = isAlive()
+	if lastAlive == nil then
+		print("Autofarm Initilised")
+	end
 	if lastAlive ~= alive then
 		lastAlive = alive
 		if alive then
