@@ -130,7 +130,7 @@ local lastAlive: boolean? = nil
 while true do
 	local alive = isAlive()
 	if lastAlive == nil then
-		print("Autofarm Initilised")
+		print("Autofarm Initialised")
 	end
 	if lastAlive ~= alive then
 		lastAlive = alive
